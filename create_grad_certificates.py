@@ -2,8 +2,12 @@
 
 from gimpfu import *
 import csv
+import os
 
-def save_grad_certificates(image, layer, output_folder, team_output_folder, season_roster_file, restrictions, do_export):
+# stores every mentor whose signature wasn't found in the file
+missing_signs = set()
+
+def save_grad_certificates(image, layer, output_folder, season_roster_file, restrictions, do_export):
     ''' Create and export graduation certificates for the SBA.
     
     Parameters
@@ -73,7 +77,7 @@ def save_grad_certificates(image, layer, output_folder, team_output_folder, seas
         center_text(mid, [main_mates])
 
         # export team certificate
-        export(image, team_output_folder, t.name)
+        export(image, output_folder, t.name, t.name)
 
         # prepare player certificates
         pdb.gimp_text_layer_set_text(main_award, "Awarded to")
@@ -86,7 +90,7 @@ def save_grad_certificates(image, layer, output_folder, team_output_folder, seas
             pdb.gimp_text_layer_set_text(main_name, player) # set player name
             pdb.gimp_text_layer_set_text(main_mates, get_teammates(t.players, player)) # set all other names on team 
             center_text(mid, [text_mates, main_mates]) # readjust position to be centered
-            export(image, output_folder, t.name + "_" + player)
+            export(image, output_folder, t.name, t.name + "_" + player)
 
         # set coach and manager signature layer inactive
         set_signatures_active(image, t, False)
@@ -105,7 +109,7 @@ def center_text(mid, texts):
     Parameters
     ----------
     mid : int
-        The middle of the image hozirontally in pixels (half of the image width).
+        The middle of the image horizontally in pixels (half of the image width).
     mains : list[gimp.Layer]
         List of text layers to be centered, in order from left to right.
     '''
@@ -146,9 +150,6 @@ def get_teammates(players, player):
     
     return val[:-2] + " and " + last + "."
 
-# stores every mentor whose signature wasn't found in the file
-missing_signs = []
-
 def set_signatures_active(image, team, active):
     ''' Sets signatures for team managers and coaches active, as well as the correct underscoring and labeling of the signatures.
 
@@ -164,29 +165,43 @@ def set_signatures_active(image, team, active):
     try:
         main_manager = pdb.gimp_image_get_layer_by_name(image, "main_manager")
         main_coach = pdb.gimp_image_get_layer_by_name(image, "main_coach")
-        main_manager_coach = pdb.gimp_image_get_layer_by_name(image, "main_manager_coach")
+        main_both_line = pdb.gimp_image_get_layer_by_name(image, "main_both_line")
+        main_both_text = pdb.gimp_image_get_layer_by_name(image, "main_both")
     except:
         gimp.message("At least one main layer does not exist. Make sure to call this plug-in on the correct file.")
 
-    pdb.gimp_item_set_visible(main_manager, not team.shared_responsibility)
-    pdb.gimp_item_set_visible(main_coach, not team.shared_responsibility)
-    pdb.gimp_item_set_visible(main_manager_coach, team.shared_responsibility)
-    if (not team.shared_responsibility):
-        pdb.gimp_text_layer_set_text(main_coach, "Coach" if not team.mult_coaches else "Coaches")
-        pdb.gimp_text_layer_set_text(main_manager, "Team Manager" if not team.mult_managers else "Team Managers")
+    layer_active = (not team.shared_responsibility) or (team.shared_responsibility and (team.mult_managers != team.mult_coaches))
+    # This ensures that, depending on team staff structure, exactly the correct underscoring layers are active.
+    # Correct active layers based on team staff structure are (exclusively): 
+    # Normal, Multiple Managers, Multiple Coaches, Multiple Managers and Coaches, Both + Manager, Both + Coach: main_manager, main_coach. (layer_active=true)
+    # Shared Responsibility, Both (singular): main_both_line, main_both_text. (layer_active=false)
+
+    pdb.gimp_item_set_visible(main_manager, layer_active)
+    pdb.gimp_item_set_visible(main_coach,   layer_active)
+    pdb.gimp_item_set_visible(main_both_line, not layer_active)
+    pdb.gimp_item_set_visible(main_both_text, not layer_active)
+
+    if (team.shared_responsibility):
+        if (team.mult_coaches and team.mult_managers):
+            pdb.gimp_text_layer_set_text(main_both_text, "Team Managers & Coaches")
+        elif (not team.mult_coaches and not team.mult_managers):
+            pdb.gimp_text_layer_set_text(main_both_text, "Team Manager & Coach")
+        else:
+            pdb.gimp_text_layer_set_text(main_manager, "Team Manager & Coach")
+            pdb.gimp_text_layer_set_text(main_coach, "Manager" if team.mult_managers else "Coach")
+    else:
+        pdb.gimp_text_layer_set_text(main_coach, "Coaches" if team.mult_coaches else "Coach")
+        pdb.gimp_text_layer_set_text(main_manager, "Team Managers" if team.mult_managers else "Team Manager")
 
     for mentor in team.mentors:
-        if (mentor == ""):
-            continue
-
         layer = pdb.gimp_image_get_layer_by_name(image, mentor)
         if (layer != None):
             pdb.gimp_item_set_visible(layer, active)
-        elif active: # since this function gets called twice, only append list of missing mentor once
-            missing_signs.append(mentor)
+        else:
+            missing_signs.add(mentor)
 
 
-def export(image, outputFolder, name):
+def export(image, output_folder, team_name, name):
     ''' Export the image to png.
 
     Parameters
@@ -200,24 +215,29 @@ def export(image, outputFolder, name):
     '''
     name = name.translate(None, '/\!?@#$.:,;<>\"\'`*+~{([])}') # remove special characters
 
-    try:
+    #try:
         # Save as PNG by creating new temporary image, merging all layers, exporting, and deleting temp image.
-        new_image = pdb.gimp_image_duplicate(image)
-        layer = pdb.gimp_image_merge_visible_layers(new_image, CLIP_TO_IMAGE)
-        gimp.pdb.file_png_save(image, layer, outputFolder + "\\" + name + ".png", "raw_filename", 0, 9, 0, 0, 0, 0, 0)
-        pdb.gimp_image_delete(new_image)
-    except Exception as err:
-        gimp.message("Unexpected error: " + str(err))
+    new_image = pdb.gimp_image_duplicate(image)
+    layer = pdb.gimp_image_merge_visible_layers(new_image, CLIP_TO_IMAGE)
+    file_path = os.path.join(output_folder, team_name)
+    if (not os.path.exists(file_path)):
+        os.makedirs(file_path)
+    gimp.pdb.file_png_save(image, layer, 
+                            os.path.join(file_path, name + ".png"), 
+                            "raw_filename", 0, 9, 0, 0, 0, 0, 0)
+    pdb.gimp_image_delete(new_image)
+    # except Exception as err:
+    #     gimp.message("Unexpected error: " + str(err))
 
 class Team:
     ''' Class to store information about academy teams.
     '''
-    name = ""
-    players = []
-    mentors = []
-    shared_responsibility = False
-    mult_coaches = False
-    mult_managers = False
+    # name = ""
+    # players = []
+    # mentors = []
+    # shared_responsibility = False
+    # mult_coaches = False
+    # mult_managers = False
 
     def __init__(self, name="", players=[], mentors=[], shared_responsibility=False, mult_coaches=False, mult_managers=False):
         self.name = name
@@ -228,9 +248,15 @@ class Team:
         self.mult_managers = mult_managers
     def type_to_str(self):
         if (self.shared_responsibility):
-            return "Shared Responsibility"
+            if (self.mult_coaches and self.mult_managers):
+                return "Shared Responsibility"
+            if (self.mult_managers):
+                return "Both + Manager"
+            if (self.mult_coaches):
+                return "Both + Coach"
+            return "Both (singular)"
         if (self.mult_coaches and self.mult_managers):
-            return "Multiple Both"
+            return "Multiple Managers and Coaches"
         if (self.mult_coaches):
             return "Multiple Coaches"
         if (self.mult_managers):
@@ -263,7 +289,7 @@ def get_teams(season_file):
             t = Team(name = team[0], # team name is at ID 0
                     players = players, 
                     mentors = coaches + managers,
-                    shared_responsibility = False, # TODO: implement this based on input field
+                    shared_responsibility = len(set(coaches) & set(managers)) > 0,
                     mult_coaches = len(coaches) > 1,
                     mult_managers = len(managers) > 1)
             
@@ -281,8 +307,7 @@ register(
     "<Image>/Filters/SplStrong/Graduation Certificates",
     "*",
     [
-        (PF_DIRNAME, "output_folder", "Player Output directory", ""),
-        (PF_DIRNAME, "team_output_folder", "Team Output directory", ""),
+        (PF_DIRNAME, "output_folder", "Output directory", ""),
         (PF_FILENAME, "season_roster_file", "file path of the academy roster sheet csv file", ""),
         (PF_STRING, "restrictions", "restrict export to one team by team name", ""),
         (PF_BOOL, "do_export", "export\n(set false to just get missing signatures)", True),
